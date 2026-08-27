@@ -1,0 +1,53 @@
+# Fork-only witness for NousResearch/hermes-agent#96608. Runs the desktop
+# gateway-download tests, including the real-filesystem suite, on a Windows
+# runner so the rename-over-existing / close-before-unlink semantics are
+# exercised against NTFS rather than only asserted through fakes. Not part of
+# the PR: lives on the ci/windows-fs-witness branch of the fork only.
+name: Windows fs witness (#96608)
+
+on:
+  push:
+    branches: [ci/windows-fs-witness]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  witness:
+    name: gateway-file-download tests on windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+
+      # package.json engines pins npm to <11.10 || >=11.17 with engine-strict.
+      - name: Pin npm
+        run: |
+          npm install -g npm@11.19.0
+          node --version
+          npm --version
+
+      - name: Install apps/desktop workspace (no Electron binary, no scripts)
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm install --workspace apps/desktop --ignore-scripts --no-audit --no-fund
+
+      - name: Real-filesystem + unit + wiring tests
+        working-directory: apps/desktop
+        run: |
+          npx vitest run             electron/gateway-file-download.fs.test.ts             electron/gateway-file-download.test.ts             electron/gateway-file-download-transport.test.ts             --reporter=verbose
+
+      - name: Typecheck electron main
+        working-directory: apps/desktop
+        run: npx tsc -p tsconfig.electron.json --noEmit
