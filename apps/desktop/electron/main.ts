@@ -277,6 +277,7 @@ import { selectPoolEvictions } from './pool-eviction'
 import { createPoolStopper } from './pool-stop'
 import { poolTouchKeys } from './pool-touch-scope'
 import { createKeepAwake } from './power-save'
+import { stateDbPreflightHomes } from './preflight-state-db'
 import { PreviewReachRegistry } from './preview-reach'
 import {
   createPrimaryRemoteConnection,
@@ -3732,7 +3733,7 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
     // ── Pre-flight state.db integrity guard (#68474) ─────────────────
     // Emergency backup and header verification before the update touches
     // anything.  Runs while the backend is still alive.
-    preflightStateDb(HERMES_HOME, rememberLog)
+    preflightAllStateDbs(HERMES_HOME, rememberLog)
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked
@@ -4169,6 +4170,17 @@ function preflightStateDb(hermesHome, rememberLog) {
   }
 }
 
+// Pre-flight EVERY database an update could clobber: the root state.db plus one
+// per profile under $HERMES_HOME/profiles/*/state.db (#97994). The root-only
+// guard left multi-profile installs with a single emergency backup out of many,
+// so a profile backend killed mid-update could lose its database unrecoverably.
+// Each home is guarded independently and prunes its own emergency backups.
+function preflightAllStateDbs(hermesHome, rememberLog) {
+  for (const home of stateDbPreflightHomes(hermesHome)) {
+    preflightStateDb(home, rememberLog)
+  }
+}
+
 // macOS/Linux update hand-off: spawn the repo-owned posix orchestrator
 // (scripts/desktop-update/posix.sh) detached and QUIT. The script waits us
 // out, runs `hermes update`, swaps/relaunches the app bundle, and writes
@@ -4196,8 +4208,8 @@ async function applyUpdatesPosixHandoff(opts: any) {
     return { ok: false, error: 'update-already-running', message: handoffConflict.message }
   }
 
-  // ── Pre-flight state.db integrity guard (#68474) ──
-  preflightStateDb(HERMES_HOME, rememberLog)
+  // ── Pre-flight state.db integrity guard (#68474, #97994) ──
+  preflightAllStateDbs(HERMES_HOME, rememberLog)
 
   // Branch-pin so a non-main checkout doesn't get switched to main (and
   // self-heal to main when the pinned branch no longer exists on origin).
