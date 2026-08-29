@@ -4094,7 +4094,7 @@ function preflightStateDb(hermesHome, rememberLog) {
   const stateDbPath = path.join(hermesHome, 'state.db')
 
   if (!fileExists(stateDbPath)) {
-    rememberLog('[updates] state.db pre-flight: not found (fresh install?)')
+    rememberLog(`[updates] state.db pre-flight: ${stateDbPath} not found (fresh install?)`)
 
     return
   }
@@ -4113,13 +4113,13 @@ function preflightStateDb(hermesHome, rememberLog) {
       const headerOk = header.equals(expectedHeader)
 
       rememberLog(
-        `[updates] state.db pre-flight: size=${stat.size}, ` +
+        `[updates] state.db pre-flight: ${stateDbPath} size=${stat.size}, ` +
           `headerOk=${headerOk}, headerHex=${header.toString('hex')}`
       )
 
       if (!headerOk) {
         rememberLog(
-          '[updates] state.db header is INVALID before update — ' +
+          `[updates] state.db header is INVALID before update (${stateDbPath}) — ` +
             'this indicates pre-existing corruption or a concurrent write issue'
         )
       }
@@ -4160,13 +4160,15 @@ function preflightStateDb(hermesHome, rememberLog) {
           void 0
         }
       } catch (copyErr) {
-        rememberLog(`[updates] emergency state.db backup failed: ${copyErr.message}`)
+        rememberLog(`[updates] emergency state.db backup failed (${emergencyPath}): ${copyErr.message}`)
       }
     } else {
-      rememberLog(`[updates] state.db too small (${stat.size} bytes) for a valid SQLite database`)
+      rememberLog(
+        `[updates] state.db too small (${stateDbPath}: ${stat.size} bytes) for a valid SQLite database`
+      )
     }
   } catch (statErr) {
-    rememberLog(`[updates] could not stat state.db before update: ${statErr.message}`)
+    rememberLog(`[updates] could not stat ${stateDbPath} before update: ${statErr.message}`)
   }
 }
 

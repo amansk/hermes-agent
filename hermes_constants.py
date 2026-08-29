@@ -139,6 +139,20 @@ def get_hermes_home() -> Path:
     return _hermes_home_from_env()
 
 
+# Emergency state.db snapshots written by the desktop updater's pre-flight
+# guard (#68474, #97994): ``state.db.pre-update-emergency-<timestamp>.bak``,
+# planted next to each guarded database — the root home's and, on multi-profile
+# installs, each ``profiles/<name>/`` home's. They exist only so THAT home can
+# recover from an update-window disaster; each is a full, stale copy of the
+# database, so profile clones, exports, and backup archives must skip them.
+_PRE_UPDATE_EMERGENCY_DB_PREFIX = "state.db.pre-update-emergency-"
+
+
+def is_pre_update_emergency_db_backup(name: str) -> bool:
+    """True when *name* is a desktop pre-update emergency state.db snapshot."""
+    return name.startswith(_PRE_UPDATE_EMERGENCY_DB_PREFIX) and name.endswith(".bak")
+
+
 def hermes_home_key(path: str | Path | None = None) -> str:
     """Return a stable key for a Hermes home/profile directory.
 

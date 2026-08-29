@@ -24,7 +24,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_constants import get_default_hermes_root, get_hermes_home, display_hermes_home
+from hermes_constants import (
+    get_default_hermes_root,
+    get_hermes_home,
+    display_hermes_home,
+    is_pre_update_emergency_db_backup,
+)
 from utils import (
     _preserve_file_mode,
     _preserve_file_owner,
@@ -322,6 +327,12 @@ def _iter_external_files(base: Path) -> List[Path]:
                 continue
             if fpath.name in _EXCLUDED_NAMES or fpath.name.endswith(_EXCLUDED_SUFFIXES):
                 continue
+            # Desktop pre-update emergency state.db snapshots (#97994) — each
+            # is a full, stale copy of a database this backup already snapshots
+            # consistently via sqlite3.backup(); shipping them re-ships the DB
+            # up to 3 more times per profile home.
+            if is_pre_update_emergency_db_backup(fpath.name):
+                continue
             files.append(fpath)
     return files
 
@@ -346,6 +357,11 @@ def _should_exclude(rel_path: Path) -> bool:
         return True
 
     if name.endswith(_EXCLUDED_SUFFIXES):
+        return True
+
+    # Desktop pre-update emergency state.db snapshots (#97994): stale full
+    # copies of a database the backup already captures via sqlite3.backup().
+    if is_pre_update_emergency_db_backup(name):
         return True
 
     return False

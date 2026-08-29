@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Dict, List, Optional, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
+from hermes_constants import is_pre_update_emergency_db_backup
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +189,13 @@ def _clone_all_copytree_ignore(source_dir: Path):
                 # over-copy than silently drop user data.
                 at_root = False
             if at_root:
-                # History artifacts: excluded for ANY source profile.
-                if entry in _CLONE_ALL_HISTORY_EXCLUDE_ROOT:
+                # History artifacts: excluded for ANY source profile.  The
+                # desktop updater's emergency state.db snapshots (#97994) are
+                # timestamped, so they need a pattern match rather than a set
+                # entry — each is a full, stale copy of the source's database.
+                if entry in _CLONE_ALL_HISTORY_EXCLUDE_ROOT or (
+                    is_pre_update_emergency_db_backup(entry)
+                ):
                     ignored.append(entry)
                     continue
                 # Infrastructure: only the default profile contains these.
@@ -2210,15 +2216,26 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
             result = _make_profile_archive(base, tmpdir, "default")
             return Path(result)
 
-    # Named profiles — stage a filtered copy to exclude credentials
+    # Named profiles — stage a filtered copy to exclude credentials and the
+    # desktop updater's emergency state.db snapshots (#97994): each snapshot
+    # is a full, stale copy of the database and would multiply archive size
+    # with data that only matters for recovering the source home in place.
     with tempfile.TemporaryDirectory() as tmpdir:
         staged = Path(tmpdir) / canon
         _CREDENTIAL_FILES = {"auth.json", ".env"}
+
+        def _named_export_ignore(directory: str, contents: List[str]) -> set:
+            return {
+                entry for entry in contents
+                if entry in _CREDENTIAL_FILES
+                or is_pre_update_emergency_db_backup(entry)
+            }
+
         shutil.copytree(
             profile_dir,
             staged,
             symlinks=True,
-            ignore=lambda d, contents: _CREDENTIAL_FILES & set(contents),
+            ignore=_named_export_ignore,
         )
         _stage_extras(staged)
         _scrub_export_secrets(staged)
