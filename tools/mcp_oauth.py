@@ -338,14 +338,20 @@ def _raise_if_non_interactive(lead: str) -> None:
     """Raise ``OAuthNonInteractiveError`` unless an interactive session exists.
 
     ``lead`` is the boundary-specific first sentence; this helper appends the
-    shared, actionable ``hermes mcp login`` next-step so the guidance wording
-    lives in one place across every non-interactive OAuth boundary (#57836).
+    shared, actionable next-step so the guidance wording lives in one place
+    across every non-interactive OAuth boundary (#57836).
+
+    Both routes are named because the CLI one assumes a shell on the Hermes
+    host, which a messaging-gateway user may not have — for them ``hermes mcp
+    login`` is a dead end and ``/mcp-login`` is the whole answer.
     """
     if not _is_interactive():
         raise OAuthNonInteractiveError(
             f"{lead} "
             "Run `hermes mcp login <server>` interactively to (re)authorize, "
-            "then restart or reload the gateway."
+            "then restart or reload the gateway. On a messaging gateway, send "
+            "`/mcp-login <server>` in a DM instead — it completes the same "
+            "flow over chat."
         )
 
 
@@ -1070,6 +1076,59 @@ def _make_callback_waiter(
     return _wait
 
 
+def is_skip_token(text: str) -> bool:
+    """True when *text* is a bare opt-out token (``skip``, ``cancel``, ...)."""
+    return (text or "").strip().lstrip("!/").lower() in _SKIP_TOKENS
+
+
+def parse_oauth_redirect(text: str) -> dict | None:
+    """Parse a pasted OAuth redirect into ``{code, state, error, iss}``.
+
+    Accepts any of:
+      - Full redirect URL: ``http://127.0.0.1:37949/callback?code=...&state=...``
+      - The provider's own callback URL: ``https://mcp.example.com/callback?code=...``
+      - Just the query string: ``?code=...&state=...`` or ``code=...&state=...``
+
+    Returns ``None`` when *text* is not a redirect at all — no ``code`` and no
+    ``error``. Callers rely on that to tell "the user pasted their callback"
+    apart from "the user said something unrelated", so this must stay strict:
+    a false positive swallows an ordinary chat message.
+
+    Shared by the stdin paste fallback (:func:`_paste_callback_reader`) and by
+    the chat-mediated flow in :mod:`tools.mcp_oauth_chat`, so both agree on
+    what counts as a valid paste.
+    """
+    line = (text or "").strip()
+    if not line:
+        return None
+
+    # Strip a leading "?" if the user pasted just a query string.
+    query = line
+    if "?" in line:
+        # Either a full URL or "?code=...". Take everything after the first "?".
+        query = line.split("?", 1)[1]
+    if query.startswith("?"):
+        query = query[1:]
+
+    try:
+        params = parse_qs(query)
+    except (ValueError, TypeError):
+        return None
+
+    code = params.get("code", [None])[0]
+    error = params.get("error", [None])[0]
+    if not code and not error:
+        return None
+
+    return {
+        "code": code,
+        "state": params.get("state", [None])[0],
+        "error": error,
+        # RFC 9207 issuer identification — see _make_callback_handler.
+        "iss": params.get("iss", [None])[0],
+    }
+
+
 def _paste_callback_reader(result: dict) -> None:
     """Read one line from stdin, parse it as an OAuth redirect, write to result.
 
@@ -1103,7 +1162,7 @@ def _paste_callback_reader(result: dict) -> None:
     # result with a sentinel error string that _wait_for_callback maps
     # to OAuthNonInteractiveError (already handled by mcp_tool.py as a
     # non-fatal "skip this server and continue startup" path).
-    if line.lower() in _SKIP_TOKENS:
+    if is_skip_token(line):
         if result.get("auth_code") is not None or result.get("error") is not None:
             return
         result["error"] = _USER_SKIPPED_SENTINEL
@@ -1115,29 +1174,8 @@ def _paste_callback_reader(result: dict) -> None:
         )
         return
 
-    # Strip a leading "?" if user pasted just a query string.
-    query = line
-    if "?" in line:
-        # Either a full URL or "?code=...". Take everything after the first "?".
-        query = line.split("?", 1)[1]
-    if query.startswith("?"):
-        query = query[1:]
-
-    try:
-        params = parse_qs(query)
-    except (ValueError, TypeError):
-        print(
-            "  Could not parse pasted input as an OAuth redirect — ignoring.",
-            file=sys.stderr,
-        )
-        return
-
-    code = params.get("code", [None])[0]
-    state = params.get("state", [None])[0]
-    error = params.get("error", [None])[0]
-    iss = params.get("iss", [None])[0]  # RFC 9207 — see _make_callback_handler
-
-    if not code and not error:
+    parsed = parse_oauth_redirect(line)
+    if parsed is None:
         print(
             "  Pasted input did not contain ``code=`` or ``error=`` — ignoring.",
             file=sys.stderr,
@@ -1148,11 +1186,11 @@ def _paste_callback_reader(result: dict) -> None:
     if result.get("auth_code") is not None or result.get("error") is not None:
         return
 
-    result["auth_code"] = code
-    result["state"] = state
-    result["error"] = error
-    result["iss"] = iss
-    if code:
+    result["auth_code"] = parsed["code"]
+    result["state"] = parsed["state"]
+    result["error"] = parsed["error"]
+    result["iss"] = parsed["iss"]
+    if parsed["code"]:
         print("  Got authorization code from paste — completing flow.", file=sys.stderr)
 
 

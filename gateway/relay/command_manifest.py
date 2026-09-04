@@ -109,6 +109,11 @@ def build_relay_command_manifest() -> List[Dict[str, Any]]:
         {"name": "insights", "description": "Show usage insights and analytics"},
         {"name": "reload-mcp", "description": "Reload MCP servers from config"},
         {
+            "name": "mcp-login",
+            "description": "Authorize an OAuth MCP server over chat",
+            "options": [_opt("server", "Configured MCP server name")],
+        },
+        {
             "name": "reload-skills",
             "description": "Re-scan skills for new or removed entries",
         },

@@ -369,6 +369,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, desktop="terminal"),
     CommandDef("reload-mcp", "Reload MCP servers from config", "Tools & Skills",
                aliases=("reload_mcp",), desktop="advanced"),
+    CommandDef("mcp-login", "Authorize an OAuth MCP server over chat", "Tools & Skills",
+               aliases=("mcp_login",), args_hint="<server>", gateway_only=True),
     CommandDef("reload-skills", "Re-scan ~/.hermes/skills/ for newly installed or removed skills",
                "Tools & Skills", aliases=("reload_skills",), desktop="advanced"),
     CommandDef("browser", "Connect browser tools to your live Chromium-family browser via CDP, or switch to Browser Use mode", "Tools & Skills",

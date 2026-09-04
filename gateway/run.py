@@ -19224,6 +19224,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "",
                     )
 
+        # Intercept a pasted OAuth redirect finishing a pending /mcp-login.
+        # resolve_paste consumes ONLY a message that parses as a redirect (or a
+        # bare skip token) and returns None for everything else, so an armed
+        # login never swallows ordinary conversation — that asymmetry is why
+        # this runs ahead of normal dispatch but cannot hijack it.
+        if allow_gateway_control:
+            from tools import mcp_oauth_chat as _mcp_oauth_chat_mod
+            if not _mcp_oauth_chat_mod.clear_if_stale(_quick_key):
+                _oauth_reply = await _mcp_oauth_chat_mod.resolve_paste(
+                    _quick_key,
+                    user_id=getattr(event.source, "user_id", None),
+                    text=event.text or "",
+                )
+                if _oauth_reply is not None:
+                    return _oauth_reply
+
         # Intercept messages that are responses to a pending /reload-mcp
         # (or future) slash-confirm prompt.  Recognized confirm replies are
         # /approve, /always, /cancel (plus short aliases).  Anything else
@@ -19959,6 +19975,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "reload-mcp":
             return await self._handle_reload_mcp_command(event)
+
+        if canonical == "mcp-login":
+            return await self._handle_mcp_login_command(event)
 
         if canonical == "reload-skills":
             return await self._handle_reload_skills_command(event)

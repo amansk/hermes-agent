@@ -5952,6 +5952,116 @@ class GatewaySlashCommandsMixin:
             logger.error("Insights command error: %s", e, exc_info=True)
             return t("gateway.insights.error", error=e)
 
+    async def _handle_mcp_login_command(self, event: MessageEvent) -> str:
+        """Handle /mcp-login <server> — authorize an OAuth MCP server over chat.
+
+        The built-in OAuth flow needs the browser that finishes authorization
+        and the Hermes process to be on the same machine. On a messaging
+        gateway they never are, and there is no TTY for the stdin paste
+        fallback, so ``/reload-mcp`` can only tell the user to go run a CLI
+        command on a host they may have no shell on.
+
+        This runs the same flow with its callback moved onto the chat channel:
+        Hermes sends the authorization URL, the user approves on their phone,
+        their browser fails to reach the loopback redirect, and they paste the
+        address bar back here. ``tools.mcp_oauth_chat`` holds the pending paste
+        and completes the handshake; no OAuth logic lives in this handler.
+        """
+        source = event.source
+        session_key = self._session_key_for_source(source)
+
+        # SECURITY: an authorization URL posted into a chat is a live
+        # invitation to bind the OPERATOR's accounts to this gateway, and the
+        # resulting tokens are usable by every session on it. With no admin
+        # list configured (the backward-compatible default) every allowed
+        # sender is treated as unrestricted, so gate this behind the same
+        # fail-closed explicit-admin check that guards cross-origin /resume
+        # and /goal gate add.
+        if not self._resume_caller_is_admin(source):
+            return (
+                "⛔ /mcp-login requires an explicitly configured gateway admin "
+                "(allow_admin_from for DMs, group_allow_admin_from for groups)."
+            )
+
+        # DM only. The prompt asks the user to paste a live authorization code
+        # back into the conversation; a group is the one place that must never
+        # happen, and the link itself is an invitation worth keeping private.
+        chat_type = (getattr(source, "chat_type", "") or "").lower()
+        if chat_type not in {"dm", "direct", "private", ""}:
+            return (
+                "⛔ /mcp-login only runs in a direct message — the authorization "
+                "link binds your own accounts to this gateway."
+            )
+
+        server_name = (event.get_command_args() or "").strip()
+        if not server_name or len(server_name.split()) > 1:
+            return "Usage: /mcp-login <server>"
+
+        from hermes_cli.mcp_config import _get_mcp_servers
+        from hermes_constants import get_hermes_home
+
+        def _read():
+            return (
+                _get_mcp_servers(),
+                str(get_hermes_home().expanduser().resolve(strict=False)),
+            )
+
+        try:
+            servers, hermes_home = await asyncio.to_thread(_read)
+        except Exception as exc:
+            logger.warning("/mcp-login could not read MCP config: %s", exc)
+            return f"Couldn't read the MCP server config: {exc}"
+
+        if server_name not in servers:
+            known = ", ".join(sorted(servers)) or "none configured"
+            return f"No MCP server named '{server_name}'. Configured: {known}."
+
+        cfg = dict(servers[server_name])
+        # Same eligibility rules the dashboard applies before starting a flow.
+        if not cfg.get("url"):
+            return (
+                f"'{server_name}' is a stdio server — it authenticates via env "
+                f"keys, not OAuth."
+            )
+        if cfg.get("headers") and cfg.get("auth") != "oauth":
+            return (
+                f"'{server_name}' uses header/API-key auth, not OAuth. Set its "
+                f"token in config instead."
+            )
+        cfg["auth"] = "oauth"
+
+        from tools import mcp_oauth_chat
+
+        # A second /mcp-login supersedes an abandoned one rather than colliding
+        # with it in start_flow's duplicate guard.
+        mcp_oauth_chat.cancel(session_key)
+
+        try:
+            started = await asyncio.to_thread(
+                lambda: mcp_oauth_chat.start(
+                    session_key,
+                    server_name=server_name,
+                    cfg=cfg,
+                    hermes_home=hermes_home,
+                    user_id=getattr(source, "user_id", None),
+                )
+            )
+        except TimeoutError:
+            return (
+                f"'{server_name}' never returned an authorization URL. It may "
+                f"not support OAuth discovery, or it may be unreachable."
+            )
+        except Exception as exc:
+            logger.warning("/mcp-login failed to start for %s: %s", server_name, exc)
+            return f"Couldn't start the {server_name} login: {exc}"
+
+        return (
+            f"Open this to authorize {server_name}:\n\n{started['auth_url']}\n\n"
+            f"Your browser will fail to load {started['redirect_uri']} after you "
+            f"approve — that's expected. Copy the whole address bar and send it "
+            f"back here. Reply `cancel` to stop."
+        )
+
     async def _handle_reload_mcp_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /reload-mcp — reconnect MCP servers and rebuild the cached agent.
 

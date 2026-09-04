@@ -394,6 +394,33 @@ def poll_flow(session_id: str, server_name: str) -> Dict[str, Any]:
     return out
 
 
+def cancel_flow(session_id: str, server_name: str) -> Dict[str, Any]:
+    """Abandon an in-flight flow whose user walked away.
+
+    Counterpart to the dashboard's ``DELETE /api/mcp/oauth/flows/{id}``: a
+    caller that knows the user is gone (they cancelled, or their paste never
+    came) should say so rather than leave the worker parked on its callback
+    wait for the full timeout — which also keeps ``start_flow``'s duplicate
+    guard rejecting the retry the user is most likely to try next.
+
+    ``deliver_callback_flow`` cannot express this: it validates ``state``
+    before it looks at ``error``, so there is no state-less way to end a flow
+    through it. Idempotent — an already-settled flow is left alone.
+    """
+    with _sessions_lock:
+        rec = _sessions.get(session_id)
+    if rec is None:
+        return {"ok": False, "error_message": "OAuth session not found or expired"}
+    if rec["server_name"] != server_name:
+        return {"ok": False, "error_message": "server name mismatch for session"}
+
+    flow = rec["flow"]
+    if not flow.worker_done:
+        flow.mark_error("Cancelled by user")
+    _shutdown_listener(rec)
+    return {"ok": True, "status": flow.snapshot().get("status")}
+
+
 def deliver_callback_flow(
     session_id: str,
     server_name: str,
