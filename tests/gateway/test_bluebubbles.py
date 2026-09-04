@@ -567,3 +567,76 @@ class TestBlueBubblesTimeoutErrorNormalization:
         assert "500 Internal Server Error" in (result.error or "")
 
 
+
+
+class TestBlueBubblesSecretHandling:
+    """The server password rides in the query string of every API URL, so any
+    exception text that quotes the failing URL carries it. Two invariants:
+    it never escapes through an error string, and it never escapes through a
+    log record."""
+
+    @pytest.mark.asyncio
+    async def test_send_error_does_not_leak_password(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, password="p@ss w0rd")
+
+        async def fake_resolve(chat_id):
+            return "iMessage;+;chat-123"
+        monkeypatch.setattr(adapter, "_resolve_chat_guid", fake_resolve)
+
+        async def fake_api_post(path, payload):
+            # httpx renders the offending URL into HTTPStatusError's message.
+            raise httpx.HTTPStatusError(
+                "Client error '401 Unauthorized' for url "
+                f"'{adapter._api_url('/api/v1/message/text')}'",
+                request=None,
+                response=None,
+            )
+        monkeypatch.setattr(adapter, "_api_post", fake_api_post)
+
+        result = await adapter.send("chat-1", "hello world")
+
+        assert not result.success
+        assert "p@ss w0rd" not in (result.error or "")
+        assert "p%40ss%20w0rd" not in (result.error or "")
+        assert "***" in (result.error or "")
+        # The diagnostic itself must survive scrubbing.
+        assert "401 Unauthorized" in (result.error or "")
+
+    def test_scrub_redacts_raw_and_percent_encoded_forms(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, password="p@ss w0rd")
+        text = "raw=p@ss w0rd encoded=p%40ss%20w0rd"
+        scrubbed = adapter._scrub(text)
+        assert "p@ss w0rd" not in scrubbed
+        assert "p%40ss%20w0rd" not in scrubbed
+        assert scrubbed.count("***") == 2
+
+    @pytest.mark.asyncio
+    async def test_webhook_rejects_wrong_and_empty_password(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+
+        for bad in ("wrong", "", "secre"):
+            response = await adapter._handle_webhook(
+                _FakeBlueBubblesRequest({"type": "new-message"}, password=bad)
+            )
+            assert response.status == 401, f"password {bad!r} must be rejected"
+
+        # The correct password still clears the gate and reaches payload
+        # handling (a well-formed event is accepted end to end).
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-1",
+                "text": "hi",
+                "handle": {"address": "+15555550100"},
+                "isFromMe": False,
+                "isGroup": False,
+                "chats": [{"guid": "iMessage;+;+15555550100"}],
+            },
+        }, password="secret"))
+        await asyncio.sleep(0)
+        assert response.status == 200

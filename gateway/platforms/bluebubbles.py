@@ -9,6 +9,7 @@ downloading from PR #4588 (YuhangLin).
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -212,6 +213,25 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         sep = "&" if "?" in path else "?"
         return f"{self.server_url}{path}{sep}password={quote(self.password, safe='')}"
 
+    def _scrub(self, text: str) -> str:
+        """Replace the server password with ``***`` anywhere it appears.
+
+        ``_api_url`` puts the password in the query string of every request,
+        and httpx renders the offending URL into its exception messages
+        ("Client error '401 Unauthorized' for url '...?password=<secret>'").
+        Those strings reach ``logger`` and ``SendResult.error``, so a wrong
+        or rotated password writes itself in plaintext into the very log an
+        operator then pastes into a bug report. Scrub the percent-encoded
+        form first (that is what appears in a URL) and the raw form after,
+        so both spellings are caught.
+        """
+        if not text or not self.password:
+            return text
+        for form in (quote(self.password, safe=""), self.password):
+            if form:
+                text = text.replace(form, "***")
+        return text
+
     @staticmethod
     def _compile_mention_patterns(raw: Any) -> List[re.Pattern]:
         """Compile group-mention wake words from config/env.
@@ -287,7 +307,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error(
-                "[bluebubbles] cannot reach server at %s: %s", self.server_url, exc
+                "[bluebubbles] cannot reach server at %s: %s",
+                self.server_url,
+                self._scrub(str(exc)),
             )
             if self.client:
                 await self.client.aclose()
@@ -423,7 +445,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning(
                 "[bluebubbles] failed to register webhook with server: %s",
-                exc,
+                self._scrub(str(exc)),
             )
             return False
 
@@ -456,7 +478,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug(
                 "[bluebubbles] failed to unregister webhook (non-critical): %s",
-                exc,
+                self._scrub(str(exc)),
             )
         return removed
 
@@ -521,7 +543,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             msg_id = data.get("guid") or data.get("messageGuid") or "ok"
             return SendResult(success=True, message_id=str(msg_id), raw_response=res)
         except Exception as exc:
-            return SendResult(success=False, error=str(exc) or type(exc).__name__)
+            return SendResult(
+                success=False, error=self._scrub(str(exc)) or type(exc).__name__
+            )
 
     # ------------------------------------------------------------------
     # Text sending
@@ -584,7 +608,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                     success=True, message_id=str(msg_id), raw_response=res
                 )
             except Exception as exc:
-                return SendResult(success=False, error=str(exc) or type(exc).__name__)
+                return SendResult(
+                    success=False, error=self._scrub(str(exc)) or type(exc).__name__
+                )
         return last
 
     # ------------------------------------------------------------------
@@ -870,7 +896,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             logger.warning(
                 "[bluebubbles] failed to download attachment %s: %s",
                 _redact(att_guid),
-                exc,
+                self._scrub(str(exc)),
             )
             return None
 
@@ -909,7 +935,19 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             or request.headers.get("x-guid")
             or request.headers.get("x-bluebubbles-guid")
         )
-        if token != self.password:
+        # Constant-time compare: `!=` leaks the shared secret a byte at a
+        # time to anyone who can hit this unauthenticated route. Every other
+        # adapter that authenticates a webhook already uses compare_digest
+        # (webhook.py, whatsapp_cloud.py, msgraph_webhook.py); this one was
+        # the outlier. Encode to bytes first — compare_digest raises
+        # TypeError on a str containing non-ASCII.
+        if (
+            not self.password
+            or not token
+            or not hmac.compare_digest(
+                token.encode("utf-8"), self.password.encode("utf-8")
+            )
+        ):
             return web.json_response({"error": "unauthorized"}, status=401)
         try:
             raw = await request.read()
@@ -928,7 +966,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 )[0]
                 payload = json.loads(payload_str) if payload_str else {}
         except Exception as exc:
-            logger.error("[bluebubbles] webhook parse error: %s", exc)
+            logger.error(
+                "[bluebubbles] webhook parse error: %s", self._scrub(str(exc))
+            )
             return web.json_response({"error": "invalid payload"}, status=400)
 
         event_type = self._value(payload.get("type"), payload.get("event")) or ""
