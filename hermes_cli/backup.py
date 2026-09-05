@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import (
     _get_platform_default_hermes_home, get_default_hermes_root, get_hermes_home, display_hermes_home,
+    is_pre_update_emergency_db_backup,
 )
 from utils import (
     _preserve_file_mode, _preserve_file_owner, _restore_file_mode, _restore_file_owner, atomic_replace,
@@ -82,10 +83,10 @@ _EXCLUDED_SUFFIXES = (".pyc", ".pyo", *_SQLITE_SIDECAR_SUFFIXES)
 # File names to skip (runtime state that's meaningless on another machine)
 _EXCLUDED_NAMES = {".backup.lock", "gateway.pid", "cron.pid"}
 
-# The desktop updater's pre-flight drops ``state.db.pre-update-emergency-<ts>.bak`` at the root
-# — a backup artifact like ``backups/``. Prefix-matched because the name carries a timestamp;
-# a plain ``.bak`` suffix rule would drop user files.
-_EXCLUDED_PREFIXES = ("state.db.pre-update-emergency-",)
+# The desktop updater's pre-flight drops ``state.db.pre-update-emergency-<ts>.bak`` next to
+# every guarded state.db (root and profiles/<name>/) — a backup artifact like ``backups/``,
+# recognised by ``hermes_constants.is_pre_update_emergency_db_backup`` (shared with the
+# profile clone/export rules so the definitions cannot drift).
 
 # Files ``hermes import`` must never overwrite, matched by basename so root and named profiles are
 # both covered. They hold runtime state namespaced to the SOURCE machine: ``gateway_state.json``
@@ -229,7 +230,11 @@ def _should_exclude(rel_path: Path) -> bool:
     if any(p in _EXCLUDED_DIRS and (p != "hermes-agent" or p == parts[0]) for p in parts):
         return True
     name = rel_path.name
-    return name in _EXCLUDED_NAMES or name.startswith(_EXCLUDED_PREFIXES) or name.endswith(_EXCLUDED_SUFFIXES)
+    return (
+        name in _EXCLUDED_NAMES
+        or is_pre_update_emergency_db_backup(name)
+        or name.endswith(_EXCLUDED_SUFFIXES)
+    )
 
 
 def _iter_backup_files(hermes_root: Path, out_path: Path, skipped_dirs: Optional[set] = None):

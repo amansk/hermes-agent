@@ -17,7 +17,12 @@ from typing import Dict, List, Optional, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
-from hermes_constants import clear_named_profile_deleted, mark_named_profile_deleted, named_profile_is_deleted
+from hermes_constants import (
+    clear_named_profile_deleted,
+    is_pre_update_emergency_db_backup,
+    mark_named_profile_deleted,
+    named_profile_is_deleted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +93,10 @@ def _clone_all_copytree_ignore(source_dir: Path):
             entry for entry in names
             if entry == "__pycache__"
             or entry.endswith((".pyc", ".pyo", ".sock", ".tmp"))
-            or (at_root and entry in root_exclude)
+            # Desktop updater's emergency state.db snapshots (#97994) are timestamped, so
+            # a pattern match rather than a set entry — each is a full, stale copy of the
+            # source's database.
+            or (at_root and (entry in root_exclude or is_pre_update_emergency_db_backup(entry)))
         ]
 
     return _ignore
@@ -1518,7 +1526,15 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     # copy under a temp dir named after the canonical id: root allow-list for default,
     # credential exclusion for named profiles.
     def _ignore_credentials(directory: str, contents: list) -> set:
-        return _EXPORT_CREDENTIAL_FILES & set(contents)
+        # Also drop the desktop updater's emergency state.db snapshots (#97994) — root-only,
+        # like the clone rule: each is a full, stale copy of the database, useful solely for
+        # recovering the source home in place; a same-named file deeper in the tree is user data.
+        at_root = Path(directory) == profile_dir
+        return {
+            entry for entry in contents
+            if entry in _EXPORT_CREDENTIAL_FILES
+            or (at_root and is_pre_update_emergency_db_backup(entry))
+        }
 
     ignore = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials
     with tempfile.TemporaryDirectory() as tmpdir:

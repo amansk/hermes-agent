@@ -167,6 +167,20 @@ _DELETED_PROFILES_DIR = ".deleted"
 # Files marking a real Hermes home; arbitrary dirs with a ``profiles`` segment lack them.
 _HERMES_HOME_MARKERS = ("config.yaml", ".env", "state.db")
 
+# Emergency state.db snapshots written by the desktop updater's pre-flight guard (#68474,
+# #97994): ``state.db.pre-update-emergency-<timestamp>.bak``, planted next to each guarded
+# database — the root home's and, on multi-profile installs, each ``profiles/<name>/``
+# home's. They exist only so THAT home can recover from an update-window disaster; each is
+# a full, stale copy of the database, so profile clones/exports (``hermes_cli.profiles``)
+# and backup archives (``hermes_cli.backup``) must skip them. Prefix-matched because the
+# name carries a timestamp; a plain ``.bak`` suffix rule would drop user files.
+_PRE_UPDATE_EMERGENCY_DB_PREFIX = "state.db.pre-update-emergency-"
+
+
+def is_pre_update_emergency_db_backup(name: str) -> bool:
+    """True when *name* is a desktop pre-update emergency state.db snapshot."""
+    return name.startswith(_PRE_UPDATE_EMERGENCY_DB_PREFIX) and name.endswith(".bak")
+
 
 def _is_hermes_profiles_root(profiles_dir: Path) -> bool:
     """True when *profiles_dir* is provably ``<hermes-home>/profiles``.
