@@ -294,6 +294,7 @@ import {
 import { createPoolStopper } from './pool-stop'
 import { poolTouchKeys } from './pool-touch-scope'
 import { createKeepAwake } from './power-save'
+import { stateDbPreflightHomes } from './preflight-state-db'
 import { capturePreviewContents } from './preview-capture'
 import { PreviewReachRegistry } from './preview-reach'
 import {
@@ -3981,7 +3982,7 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
     // ── Pre-flight state.db integrity guard (#68474) ─────────────────
     // Emergency backup and header verification before the update touches
     // anything.  Runs while the backend is still alive.
-    preflightStateDb(HERMES_HOME, rememberLog)
+    preflightAllStateDbs(HERMES_HOME, rememberLog)
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked
@@ -4354,11 +4355,26 @@ function runningAppBundle() {
 // desktop Electron process itself, before the backend is killed and
 // before the updater is spawned — a separate safety net from the
 // Python-level pre-update snapshot inside `hermes update`.
+// Free space the emergency state.db copy must leave behind for the update itself
+// (git fetch/checkout, pip/uv installs). 512 MiB.
+const EMERGENCY_BACKUP_FREE_SPACE_MARGIN = 512 * 1024 * 1024
+
+// Free bytes on the volume holding `dir`, or null when it cannot be determined.
+function freeDiskBytes(dir): number | null {
+  try {
+    const sfs = fs.statfsSync(dir)
+
+    return Number(sfs.bavail) * Number(sfs.bsize)
+  } catch {
+    return null
+  }
+}
+
 function preflightStateDb(hermesHome, rememberLog) {
   const stateDbPath = path.join(hermesHome, 'state.db')
 
   if (!fileExists(stateDbPath)) {
-    rememberLog('[updates] state.db pre-flight: not found (fresh install?)')
+    rememberLog(`[updates] state.db pre-flight: ${stateDbPath} not found (fresh install?)`)
 
     return
   }
@@ -4377,13 +4393,13 @@ function preflightStateDb(hermesHome, rememberLog) {
       const headerOk = header.equals(expectedHeader)
 
       rememberLog(
-        `[updates] state.db pre-flight: size=${stat.size}, ` +
+        `[updates] state.db pre-flight: ${stateDbPath} size=${stat.size}, ` +
           `headerOk=${headerOk}, headerHex=${header.toString('hex')}`
       )
 
       if (!headerOk) {
         rememberLog(
-          '[updates] state.db header is INVALID before update — ' +
+          `[updates] state.db header is INVALID before update (${stateDbPath}) — ` +
             'this indicates pre-existing corruption or a concurrent write issue'
         )
       }
@@ -4392,6 +4408,20 @@ function preflightStateDb(hermesHome, rememberLog) {
       const ts = new Date().toISOString().replace(/[:.]/g, '-')
 
       const emergencyPath = path.join(hermesHome, `state.db.pre-update-emergency-${ts}.bak`)
+
+      // Disk guard (#97994): with one emergency copy per profile home, refuse a copy
+      // that cannot fit rather than run the volume dry and sink the update itself.
+      // Best-effort — when free space cannot be read, copy exactly as before.
+      const freeBytes = freeDiskBytes(hermesHome)
+
+      if (freeBytes !== null && freeBytes < stat.size + EMERGENCY_BACKUP_FREE_SPACE_MARGIN) {
+        rememberLog(
+          `[updates] emergency state.db backup SKIPPED (${emergencyPath}): ` +
+            `needs ${stat.size} bytes, ${freeBytes} free (margin ${EMERGENCY_BACKUP_FREE_SPACE_MARGIN})`
+        )
+
+        return
+      }
 
       try {
         fs.copyFileSync(stateDbPath, emergencyPath)
@@ -4424,13 +4454,34 @@ function preflightStateDb(hermesHome, rememberLog) {
           void 0
         }
       } catch (copyErr) {
-        rememberLog(`[updates] emergency state.db backup failed: ${copyErr.message}`)
+        rememberLog(`[updates] emergency state.db backup failed (${emergencyPath}): ${copyErr.message}`)
+
+        // A partial copy (ENOSPC mid-write) is worse than none: it looks like a
+        // backup, would be kept by the pruner, and still holds the space.
+        try {
+          fs.unlinkSync(emergencyPath)
+        } catch {
+          void 0
+        }
       }
     } else {
-      rememberLog(`[updates] state.db too small (${stat.size} bytes) for a valid SQLite database`)
+      rememberLog(
+        `[updates] state.db too small (${stateDbPath}: ${stat.size} bytes) for a valid SQLite database`
+      )
     }
   } catch (statErr) {
-    rememberLog(`[updates] could not stat state.db before update: ${statErr.message}`)
+    rememberLog(`[updates] could not stat ${stateDbPath} before update: ${statErr.message}`)
+  }
+}
+
+// Pre-flight EVERY database an update could clobber: the root state.db plus one
+// per profile under $HERMES_HOME/profiles/*/state.db (#97994). The root-only
+// guard left multi-profile installs with a single emergency backup out of many,
+// so a profile backend killed mid-update could lose its database unrecoverably.
+// Each home is guarded independently and prunes its own emergency backups.
+function preflightAllStateDbs(hermesHome, rememberLog) {
+  for (const home of stateDbPreflightHomes(hermesHome)) {
+    preflightStateDb(home, rememberLog)
   }
 }
 
@@ -4461,8 +4512,8 @@ async function applyUpdatesPosixHandoff(opts: any) {
     return { ok: false, error: 'update-already-running', message: handoffConflict.message }
   }
 
-  // ── Pre-flight state.db integrity guard (#68474) ──
-  preflightStateDb(HERMES_HOME, rememberLog)
+  // ── Pre-flight state.db integrity guard (#68474, #97994) ──
+  preflightAllStateDbs(HERMES_HOME, rememberLog)
 
   // Branch-pin so a non-main checkout doesn't get switched to main (and
   // self-heal to main when the pinned branch no longer exists on origin).
